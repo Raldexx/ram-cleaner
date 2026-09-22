@@ -26,12 +26,16 @@
 
       <p id="clean-result"></p>
 
+      <div class="table-controls">
+        <input id="filter-input" type="text" placeholder="Process ara..." />
+      </div>
+
       <table id="process-table">
         <thead>
           <tr>
-            <th>PID</th>
-            <th>Name</th>
-            <th>RAM (MB)</th>
+            <th data-sort="pid">PID</th>
+            <th data-sort="name">Name</th>
+            <th data-sort="memory_mb">RAM (MB)</th>
             <th></th>
           </tr>
         </thead>

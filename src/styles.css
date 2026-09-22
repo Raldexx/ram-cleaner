@@ -96,10 +96,24 @@ button:disabled {
 
 /* --- Process table --- */
 
+.table-controls {
+  margin-top: 1em;
+  display: flex;
+}
+
+#filter-input {
+  flex: 1;
+  padding: 0.5em 0.8em;
+  border-radius: 8px;
+  border: 1px solid #e0e0e0;
+  font-family: inherit;
+  font-size: 0.95em;
+}
+
 #process-table {
   width: 100%;
   border-collapse: collapse;
-  margin-top: 1em;
+  margin-top: 0.8em;
 }
 
 #process-table th,
@@ -111,6 +125,15 @@ button:disabled {
 
 #process-table th {
   font-weight: 600;
+}
+
+#process-table th[data-sort] {
+  cursor: pointer;
+  user-select: none;
+}
+
+#process-table th[data-sort]:hover {
+  color: #396cd8;
 }
 
 .row-clean-btn {
@@ -135,6 +158,12 @@ button:disabled {
 
   .ram-bar {
     background-color: #444444;
+  }
+
+  #filter-input {
+    background-color: #0f0f0f98;
+    border-color: #444444;
+    color: #f6f6f6;
   }
 
   #process-table th,

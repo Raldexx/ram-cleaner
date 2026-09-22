@@ -5,7 +5,7 @@ use windows::Win32::System::ProcessStatus::{
 };
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ, PROCESS_VM_OPERATION,
+    OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_SET_QUOTA, PROCESS_VM_READ,
     GetCurrentProcess,
 };
 
@@ -132,8 +132,9 @@ fn clean_own_memory() {
 
 
 fn clean_process(pid: u32) -> bool {
+    // EmptyWorkingSet needs PROCESS_SET_QUOTA, not PROCESS_VM_OPERATION.
     let handle_result = unsafe {
-        OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION, false, pid)
+        OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_SET_QUOTA, false, pid)
     };
 
     match handle_result {
