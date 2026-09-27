@@ -2,11 +2,10 @@ const { invoke } = window.__TAURI__.core;
 
 let ramText, ramBarFill, cleanBtn, refreshBtn, cleanResult, processTbody, filterInput, tableHeaders;
 
-// Rust'tan gelen ham liste burada duruyor. Filtre/sıralama bunun üzerinde
-// JS tarafında yapılıyor — her tuş vuruşunda Rust'a tekrar sormuyoruz.
+
 let allProcesses = [];
-let sortKey = "memory_mb"; // hangi sütuna göre sıralı: "pid" | "name" | "memory_mb"
-let sortDir = "desc";      // "asc" ya da "desc"
+let sortKey = "memory_mb"; 
+let sortDir = "desc";      
 
 async function refreshMemory() {
   const info = await invoke("get_memory_info");
@@ -17,15 +16,11 @@ async function refreshMemory() {
 }
 
 async function refreshProcesses() {
-  // Sadece burada Rust'a soruyoruz. Filtreleme/sıralama için ayrı bir
-  // invoke çağrısı yok, elimizdeki listeyi renderProcesses() ile diziyoruz.
   allProcesses = await invoke("get_processes");
   renderProcesses();
 }
 
-// allProcesses'i filtre + sıralama kurallarına göre süzüp tabloyu yeniden çizer.
-// Ağdan (Rust'tan) veri istemeden çalışır, o yüzden filtre input'unda ve
-// başlığa tıklamada direkt bunu çağırıyoruz.
+
 function renderProcesses() {
   const query = filterInput.value.trim().toLowerCase();
 
@@ -38,7 +33,7 @@ function renderProcesses() {
     const cmp =
       sortKey === "name"
         ? a.name.localeCompare(b.name)
-        : a[sortKey] - b[sortKey]; // pid ve memory_mb sayı, çıkarma yeter
+        : a[sortKey] - b[sortKey]; 
     return sortDir === "asc" ? cmp : -cmp;
   });
 
@@ -76,18 +71,17 @@ function renderProcesses() {
   updateSortIndicators();
 }
 
-// Aktif sıralanan sütunun başlığına ▲/▼ koyar, diğerlerini düz bırakır.
+
 function updateSortIndicators() {
   for (const th of tableHeaders) {
     const key = th.dataset.sort;
-    if (!key) continue; // son sütun (aksiyon butonu) sıralanamaz, data-sort'u yok
+    if (!key) continue;
     const arrow = key === sortKey ? (sortDir === "asc" ? " ▲" : " ▼") : "";
     th.textContent = th.dataset.label + arrow;
   }
 }
 
-// Bir başlığa tıklanınca: aynı sütunsa yön ters döner, farklı sütunsa
-// o sütuna geçip varsayılan olarak büyükten küçüğe sıralar.
+
 function handleHeaderClick(e) {
   const key = e.currentTarget.dataset.sort;
   if (!key) return;
@@ -97,7 +91,7 @@ function handleHeaderClick(e) {
     sortKey = key;
     sortDir = "desc";
   }
-  renderProcesses(); // Rust'a sormadan, elimizdeki veriyi yeniden diz
+  renderProcesses(); 
 }
 
 async function refreshAll() {
@@ -129,8 +123,7 @@ window.addEventListener("DOMContentLoaded", () => {
   filterInput = document.querySelector("#filter-input");
   tableHeaders = document.querySelectorAll("#process-table th[data-sort]");
 
-  // th'nin orijinal yazısını data-label'a saklıyoruz; yoksa ok eklerken
-  // "PID ▼ ▼ ▼" gibi üst üste binmeye başlar.
+
   for (const th of tableHeaders) {
     th.dataset.label = th.textContent;
     th.addEventListener("click", handleHeaderClick);
@@ -142,5 +135,5 @@ window.addEventListener("DOMContentLoaded", () => {
 
   refreshAll();
   setInterval(refreshMemory, 2000);
-  setInterval(refreshProcesses, 3000); // process listesi daha ağır, 3sn yeter
+  setInterval(refreshProcesses, 3000); 
 });
