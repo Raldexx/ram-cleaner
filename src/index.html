@@ -26,8 +26,59 @@
 
       <p id="clean-result"></p>
 
+      <details class="settings">
+        <summary>Smart settings</summary>
+        <div class="settings-body">
+
+          <fieldset>
+            <legend>Auto clean</legend>
+            <label><input type="checkbox" id="auto-enabled" /> Enabled</label>
+            <label>
+              Trigger
+              <select id="auto-trigger">
+                <option value="interval">Interval</option>
+                <option value="threshold">RAM threshold</option>
+              </select>
+            </label>
+            <label id="interval-label">
+              Every <input type="number" id="interval-minutes" min="1" max="1440" /> minutes
+            </label>
+            <label id="threshold-label">
+              When RAM usage exceeds <input type="number" id="threshold-percent" min="50" max="99" /> %
+            </label>
+          </fieldset>
+
+          <fieldset>
+            <legend>Clean mode</legend>
+            <select id="clean-mode">
+              <option value="all">Clean everything (except whitelist)</option>
+              <option value="blacklist_only">Clean blacklist only</option>
+            </select>
+          </fieldset>
+
+          <div class="list-editor" data-list="whitelist">
+            <h4>Whitelist <small>(never cleaned)</small></h4>
+            <div class="list-add"><input type="text" placeholder="Type to search running apps..." autocomplete="off" /><button>Add</button><div class="suggestions" hidden></div></div>
+            <div class="chips"></div>
+          </div>
+
+          <div class="list-editor" data-list="blacklist">
+            <h4>Blacklist <small>(only cleaned in "blacklist only" mode)</small></h4>
+            <div class="list-add"><input type="text" placeholder="Type to search running apps..." autocomplete="off" /><button>Add</button><div class="suggestions" hidden></div></div>
+            <div class="chips"></div>
+          </div>
+
+          <div class="list-editor" data-list="guard_list">
+            <h4>Critical processes <small>(cleaning is blocked/warned while any is running)</small></h4>
+            <div class="list-add"><input type="text" placeholder="Type to search running apps..." autocomplete="off" /><button>Add</button><div class="suggestions" hidden></div></div>
+            <div class="chips"></div>
+          </div>
+
+        </div>
+      </details>
+
       <div class="table-controls">
-        <input id="filter-input" type="text" placeholder="Process ara..." />
+        <input id="filter-input" type="text" placeholder="Search processes (name or PID)..." />
       </div>
 
       <table id="process-table">

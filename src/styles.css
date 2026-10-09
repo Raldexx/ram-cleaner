@@ -94,6 +94,133 @@ button:disabled {
   opacity: 0.8;
 }
 
+/* --- Settings --- */
+
+.settings {
+  margin-top: 1em;
+  text-align: left;
+}
+
+.settings summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1em;
+  margin-top: 0.8em;
+}
+
+.settings fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.8em 1.2em;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+}
+
+.settings input[type="number"] {
+  width: 4.5em;
+}
+
+.settings input[type="text"],
+.settings input[type="number"],
+.settings select {
+  padding: 0.3em 0.5em;
+  border-radius: 6px;
+  border: 1px solid #e0e0e0;
+  font-family: inherit;
+}
+
+.list-editor h4 {
+  margin: 0 0 0.4em;
+}
+
+.list-editor small {
+  font-weight: 400;
+  opacity: 0.7;
+}
+
+.list-add {
+  position: relative; /* suggestions box is positioned against this */
+  display: flex;
+  gap: 0.4em;
+}
+
+.suggestions {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  margin-top: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  background-color: #ffffff;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.suggestions[hidden] {
+  display: none;
+}
+
+.suggestion {
+  display: flex;
+  justify-content: space-between;
+  gap: 1em;
+  padding: 0.35em 0.7em;
+  cursor: pointer;
+}
+
+.suggestion small {
+  opacity: 0.6;
+}
+
+.suggestion:hover,
+.suggestion.active {
+  background-color: #396cd8;
+  color: #ffffff;
+}
+
+.list-add input {
+  flex: 1;
+}
+
+.list-add button {
+  padding: 0.3em 0.8em;
+  box-shadow: none;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4em;
+  margin-top: 0.5em;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2em;
+  padding: 0.1em 0.2em 0.1em 0.7em;
+  border-radius: 999px;
+  background-color: #e0e0e0;
+  font-size: 0.85em;
+}
+
+.chip button {
+  padding: 0 0.5em;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
+  font-size: 1em;
+}
+
 /* --- Process table --- */
 
 .table-controls {
@@ -158,6 +285,27 @@ button:disabled {
 
   .ram-bar {
     background-color: #444444;
+  }
+
+  .settings input[type="text"],
+  .settings input[type="number"],
+  .settings select {
+    background-color: #0f0f0f98;
+    border-color: #444444;
+    color: #f6f6f6;
+  }
+
+  .settings fieldset {
+    border-color: #444444;
+  }
+
+  .chip {
+    background-color: #444444;
+  }
+
+  .suggestions {
+    background-color: #1f1f1f;
+    border-color: #444444;
   }
 
   #filter-input {

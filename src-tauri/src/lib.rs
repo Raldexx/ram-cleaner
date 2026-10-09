@@ -1,4 +1,8 @@
 use serde::Serialize;
+
+mod smart;
+use smart::{AppState, Settings};
+
 use windows::Win32::System::ProcessStatus::{
     GetPerformanceInfo, PERFORMANCE_INFORMATION, EnumProcesses, GetModuleBaseNameA,
     PROCESS_MEMORY_COUNTERS, GetProcessMemoryInfo, EmptyWorkingSet,
@@ -24,15 +28,18 @@ pub struct ProcessInfo {
     memory_mb: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct CleanResult {
     cleaned: u32,
     failed: u32,
+    skipped: u32,
     freed_mb: f64,
+    /// Full name of the process that blocked the cleaning due to guard list, if any.
+    blocked_by: Option<String>,
 }
 
 
-fn read_memory_info() -> MemoryInfo {
+pub(crate) fn read_memory_info() -> MemoryInfo {
     let mut perf_info = PERFORMANCE_INFORMATION::default();
     perf_info.cb = std::mem::size_of::<PERFORMANCE_INFORMATION>() as u32;
 
@@ -149,29 +156,35 @@ fn clean_process(pid: u32) -> bool {
     }
 }
 
-fn clean_all_processes() -> CleanResult {
+pub(crate) fn clean_all_processes(settings: &Settings, force: bool) -> CleanResult {
     let before = read_memory_info();
+    let processes = read_process_list();
 
-    let mut process_ids: [u32; 1024] = [0; 1024];
-    let mut bytes_returned: u32 = 0;
-    unsafe {
-        let _ = EnumProcesses(
-            process_ids.as_mut_ptr(),
-            std::mem::size_of_val(&process_ids) as u32,
-            &mut bytes_returned,
-        );
+    // Critical Process Guard: If any process in the whitelist is running, skip cleaning unless force is true
+    if !force {
+        let names: Vec<String> = processes.iter().map(|p| p.name.clone()).collect();
+        if let Some(name) = settings.find_guard_hit(&names) {
+            return CleanResult {
+                cleaned: 0,
+                failed: 0,
+                skipped: 0,
+                freed_mb: 0.0,
+                blocked_by: Some(name),
+            };
+        }
     }
-    let process_count = bytes_returned as usize / std::mem::size_of::<u32>();
 
     let mut cleaned = 0u32;
     let mut failed = 0u32;
+    let mut skipped = 0u32;
 
-    for i in 0..process_count {
-        let pid = process_ids[i];
-        if pid == 0 {
+    for p in &processes {
+        // Whitelist and blacklist filtering
+        if !settings.should_clean(&p.name.to_lowercase()) {
+            skipped += 1;
             continue;
         }
-        if clean_process(pid) {
+        if clean_process(p.pid) {
             cleaned += 1;
         } else {
             failed += 1;
@@ -184,7 +197,9 @@ fn clean_all_processes() -> CleanResult {
     CleanResult {
         cleaned,
         failed,
+        skipped,
         freed_mb,
+        blocked_by: None,
     }
 }
 
@@ -200,8 +215,22 @@ fn get_processes() -> Vec<ProcessInfo> {
 }
 
 #[tauri::command]
-fn clean_all() -> CleanResult {
-    clean_all_processes()
+fn clean_all(force: Option<bool>, state: tauri::State<AppState>) -> CleanResult {
+    let settings = state.settings.lock().unwrap().clone();
+    clean_all_processes(&settings, force.unwrap_or(false))
+}
+
+#[tauri::command]
+fn get_settings(state: tauri::State<AppState>) -> Settings {
+    state.settings.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn save_settings(mut settings: Settings, state: tauri::State<AppState>) -> Settings {
+    settings.sanitize();
+    *state.settings.lock().unwrap() = settings.clone();
+    state.save();
+    settings
 }
 
 #[tauri::command]
@@ -227,6 +256,11 @@ pub fn run() {
         .setup(|app| {
             use tauri_plugin_autostart::ManagerExt;
             let _ = app.autolaunch().enable();
+
+            // %APPDATA%\<identifier>\settings.json
+            let config_dir = app.path().app_config_dir()?;
+            app.manage(AppState::load(config_dir.join("settings.json")));
+            smart::start_auto_cleaner(app.handle().clone());
 
             let show_item = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -260,7 +294,9 @@ pub fn run() {
             get_memory_info,
             get_processes,
             clean_all,
-            clean_single
+            clean_single,
+            get_settings,
+            save_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
