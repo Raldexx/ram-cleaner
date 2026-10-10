@@ -3,6 +3,9 @@ use serde::Serialize;
 mod smart;
 use smart::{AppState, Settings};
 
+use windows::core::w;
+use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+
 use windows::Win32::System::ProcessStatus::{
     GetPerformanceInfo, PERFORMANCE_INFORMATION, EnumProcesses, GetModuleBaseNameA,
     PROCESS_MEMORY_COUNTERS, GetProcessMemoryInfo, EmptyWorkingSet,
@@ -34,7 +37,6 @@ pub struct CleanResult {
     failed: u32,
     skipped: u32,
     freed_mb: f64,
-    /// Full name of the process that blocked the cleaning due to guard list, if any.
     blocked_by: Option<String>,
 }
 
@@ -160,7 +162,7 @@ pub(crate) fn clean_all_processes(settings: &Settings, force: bool) -> CleanResu
     let before = read_memory_info();
     let processes = read_process_list();
 
-    // Critical Process Guard: If any process in the whitelist is running, skip cleaning unless force is true
+    // critical process guard: whitelist/blacklist/guard_list controls which processes can be cleaned. If a guard process is running, cleaning is blocked.
     if !force {
         let names: Vec<String> = processes.iter().map(|p| p.name.clone()).collect();
         if let Some(name) = settings.find_guard_hit(&names) {
@@ -179,7 +181,6 @@ pub(crate) fn clean_all_processes(settings: &Settings, force: bool) -> CleanResu
     let mut skipped = 0u32;
 
     for p in &processes {
-        // Whitelist and blacklist filtering
         if !settings.should_clean(&p.name.to_lowercase()) {
             skipped += 1;
             continue;
@@ -233,6 +234,48 @@ fn save_settings(mut settings: Settings, state: tauri::State<AppState>) -> Setti
     settings
 }
 
+fn read_dword(subkey: windows::core::PCWSTR, value: windows::core::PCWSTR) -> Option<u32> {
+    let mut data: u32 = 0;
+    let mut size: u32 = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey,
+            value,
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut data as *mut u32 as *mut std::ffi::c_void),
+            Some(&mut size),
+        )
+    };
+    if status.0 == 0 { Some(data) } else { None }
+}
+
+#[tauri::command]
+fn get_accent_color() -> Option<String> {
+    let key = w!("Software\\Microsoft\\Windows\\DWM");
+
+    if let Some(v) = read_dword(key, w!("AccentColor")) {
+        return Some(format!("#{:02x}{:02x}{:02x}", v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF));
+    }
+    read_dword(key, w!("ColorizationColor"))
+        .map(|v| format!("#{:02x}{:02x}{:02x}", (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF))
+}
+
+#[tauri::command]
+fn get_autostart(app: tauri::AppHandle) -> bool {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+#[tauri::command]
+fn set_autostart(enabled: bool, app: tauri::AppHandle) -> bool {
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app.autolaunch();
+    let _ = if enabled { manager.enable() } else { manager.disable() };
+    manager.is_enabled().unwrap_or(false)
+}
+
 #[tauri::command]
 fn clean_single(pid: u32) -> bool {
     clean_process(pid)
@@ -255,11 +298,14 @@ pub fn run() {
         ))
         .setup(|app| {
             use tauri_plugin_autostart::ManagerExt;
-            let _ = app.autolaunch().enable();
 
-            // %APPDATA%\<identifier>\settings.json
             let config_dir = app.path().app_config_dir()?;
             app.manage(AppState::load(config_dir.join("settings.json")));
+
+            let first_run = !app.state::<AppState>().settings.lock().unwrap().onboarded;
+            if first_run {
+                let _ = app.autolaunch().enable();
+            }
             smart::start_auto_cleaner(app.handle().clone());
 
             let show_item = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
@@ -296,7 +342,10 @@ pub fn run() {
             clean_all,
             clean_single,
             get_settings,
-            save_settings
+            save_settings,
+            get_accent_color,
+            get_autostart,
+            set_autostart
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

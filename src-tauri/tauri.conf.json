@@ -10,9 +10,12 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "ram-cleaner",
-        "width": 800,
-        "height": 600
+        "title": "RAM Cleaner",
+        "width": 1100,
+        "height": 820,
+        "minWidth": 820,
+        "minHeight": 640,
+        "center": true
       }
     ],
     "security": {

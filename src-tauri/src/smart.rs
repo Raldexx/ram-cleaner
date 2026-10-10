@@ -4,7 +4,6 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
-
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Settings {
@@ -16,6 +15,7 @@ pub struct Settings {
     pub auto_trigger: String,
     pub interval_minutes: u32,
     pub threshold_percent: u32,
+    pub onboarded: bool,
 }
 
 impl Default for Settings {
@@ -29,6 +29,7 @@ impl Default for Settings {
             auto_trigger: "interval".into(),
             interval_minutes: 30,
             threshold_percent: 85,
+            onboarded: false,
         }
     }
 }
@@ -115,7 +116,7 @@ pub fn start_auto_cleaner(app: AppHandle) {
             let settings = state.settings.lock().unwrap().clone();
 
             if !settings.auto_enabled {
-                last_clean = Instant::now(); 
+                last_clean = Instant::now();
                 continue;
             }
 
