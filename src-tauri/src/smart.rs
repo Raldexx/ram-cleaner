@@ -4,17 +4,26 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 
+/// User settings, stored on disk as settings.json.
+/// `#[serde(default)]` fills any missing field with its default, so adding a new
+/// setting later never breaks an older settings.json.
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Settings {
+    /// Whitelist: these processes are never cleaned.
     pub whitelist: Vec<String>,
+    /// Blacklist: when mode is "blacklist_only", only these are cleaned.
     pub blacklist: Vec<String>,
+    /// "all" = everything except the whitelist, "blacklist_only" = only the blacklist.
     pub mode: String,
+    /// Critical processes (games, renders...): while one is running, cleaning pauses until confirmed.
     pub guard_list: Vec<String>,
     pub auto_enabled: bool,
+    /// "interval" = every X minutes, "threshold" = when RAM usage passes a percentage.
     pub auto_trigger: String,
     pub interval_minutes: u32,
     pub threshold_percent: u32,
+    /// Whether the welcome tour was finished or skipped. While false, the UI shows it.
     pub onboarded: bool,
 }
 
@@ -35,6 +44,7 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Tidies incoming data: lowercase, trim, drop duplicates, clamp numbers.
     pub fn sanitize(&mut self) {
         fn norm(v: &mut Vec<String>) {
             let mut out: Vec<String> = Vec::new();
@@ -59,6 +69,7 @@ impl Settings {
         self.threshold_percent = self.threshold_percent.clamp(50, 99);
     }
 
+    /// Should this process be cleaned? (`lname` must be lowercase)
     pub fn should_clean(&self, lname: &str) -> bool {
         if self.whitelist.iter().any(|w| w == lname) {
             return false;
@@ -69,6 +80,7 @@ impl Settings {
         true
     }
 
+    /// Is any critical process running? Returns the name of the first one found.
     pub fn find_guard_hit(&self, running_names: &[String]) -> Option<String> {
         running_names
             .iter()
@@ -77,6 +89,7 @@ impl Settings {
     }
 }
 
+/// Shared state registered with Tauri's `manage()`; commands reach it through `State`.
 pub struct AppState {
     pub settings: Mutex<Settings>,
     pub path: PathBuf,
@@ -106,6 +119,8 @@ impl AppState {
     }
 }
 
+/// Background thread: keeps running while the window is hidden in the tray,
+/// which is why the timer lives in Rust and not in JavaScript.
 pub fn start_auto_cleaner(app: AppHandle) {
     std::thread::spawn(move || {
         let mut last_clean = Instant::now();
@@ -116,12 +131,13 @@ pub fn start_auto_cleaner(app: AppHandle) {
             let settings = state.settings.lock().unwrap().clone();
 
             if !settings.auto_enabled {
-                last_clean = Instant::now();
+                last_clean = Instant::now(); // keep the clock at zero while disabled
                 continue;
             }
 
             let elapsed = last_clean.elapsed();
             let due = if settings.auto_trigger == "threshold" {
+                // 60 s cooldown: if RAM stays above the threshold after a clean, don't loop
                 elapsed >= Duration::from_secs(60)
                     && crate::read_memory_info().percent_used >= settings.threshold_percent as f64
             } else {

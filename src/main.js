@@ -1,18 +1,27 @@
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
-let settings = null;          
-let allProcesses = [];        
-let originalNames = new Map(); 
-let sortKey = "memory_mb";    
-let sortDir = "desc";         
-let activeTab = "whitelist";  
-const expanded = new Set();   
-const rowCache = new Map();   
-let el = {};                  
+// =====================================================================
+// State
+// =====================================================================
+
+let settings = null;          // JS copy of Rust's Settings; changed -> persistSettings()
+let allProcesses = [];        // raw list from Rust (one entry per process)
+let originalNames = new Map(); // "chrome.exe" -> "chrome.exe" as Windows spells it
+let sortKey = "memory_mb";    // "memory_mb" | "name"
+let sortDir = "desc";         // "asc" | "desc"
+let activeTab = "whitelist";  // "whitelist" | "blacklist" | "guard_list"
+const expanded = new Set();   // app keys whose PID section is open
+const rowCache = new Map();   // app key -> its DOM row (rows are reused, not rebuilt)
+let el = {};                  // DOM references, filled in DOMContentLoaded
+let active = null;            // true while the window is on screen; false in the tray or minimized
+let pollTimers = [];
 
 const $ = (selector) => document.querySelector(selector);
 
+// =====================================================================
+// Names, avatars, formatting
+// =====================================================================
 
 // Friendly names for common apps. Everything else is auto-capitalized ("discord.exe" -> "Discord").
 const APP_NAMES = {
@@ -43,12 +52,97 @@ function displayName(name) {
   return pretty || name;
 }
 
+// App key ("chrome.exe") -> PNG data URL, or null when the app has no readable icon.
+// Kept in localStorage so icons show instantly on the next launch, even for apps that aren't running.
+const iconCache = new Map();
+try {
+  for (const [key, url] of Object.entries(JSON.parse(localStorage.getItem("icons") || "{}"))) iconCache.set(key, url);
+} catch (e) {}
+
 function paintAvatar(node, name) {
-  const label = displayName(name);
-  node.textContent = (label[0] || "?").toUpperCase();
+  const key = name.toLowerCase();
+  const icon = iconCache.get(key);
+  const look = icon ? "icon" : "letter";
+  if (node.dataset.key === key && node.dataset.look === look) return; // already painted
+  node.dataset.key = key;
+  node.dataset.look = look;
+
+  if (icon) {
+    node.textContent = "";
+    node.classList.add("has-icon");
+    node.style.background = `url("${icon}") center / 66% no-repeat, var(--card-solid)`;
+    return;
+  }
+
+  node.classList.remove("has-icon");
+  node.textContent = (displayName(name)[0] || "?").toUpperCase();
   let hue = 0;
-  for (const c of name.toLowerCase().replace(/\.exe$/, "")) hue = (hue * 31 + c.charCodeAt(0)) % 360;
+  for (const c of key.replace(/\.exe$/, "")) hue = (hue * 31 + c.charCodeAt(0)) % 360;
   node.style.background = `linear-gradient(145deg, hsl(${hue} 72% 58%), hsl(${(hue + 30) % 360} 70% 45%))`;
+}
+
+function repaintAvatars(key) {
+  for (const node of document.querySelectorAll(".avatar")) {
+    if (node.dataset.key === key) paintAvatar(node, key);
+  }
+}
+
+// ---- Icon loading: one app at a time, only while the window is visible ----
+
+const iconQueue = [];
+const iconPending = new Set();
+let iconWorking = false;
+let iconSaveTimer = 0;
+
+function iconToDataUrl({ width, height, rgba }) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  canvas.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0);
+  return canvas.toDataURL("image/png");
+}
+
+function requestIcon(group) {
+  if (iconCache.has(group.key) || iconPending.has(group.key)) return;
+  iconPending.add(group.key);
+  iconQueue.push(group);
+  drainIcons();
+}
+
+async function drainIcons() {
+  if (iconWorking) return;
+  iconWorking = true;
+  while (iconQueue.length && active) {
+    const group = iconQueue.shift();
+    let url = null;
+    // the first PIDs may be protected processes; a few tries are enough
+    for (const p of group.procs.slice(0, 3)) {
+      try {
+        const data = await invoke("get_app_icon", { pid: p.pid });
+        if (data) {
+          url = iconToDataUrl(data);
+          break;
+        }
+      } catch (e) {}
+    }
+    iconCache.set(group.key, url);
+    iconPending.delete(group.key);
+    if (url) {
+      repaintAvatars(group.key);
+      clearTimeout(iconSaveTimer);
+      iconSaveTimer = setTimeout(saveIcons, 1500);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20)); // keep the UI thread breathing
+  }
+  iconWorking = false;
+}
+
+function saveIcons() {
+  const out = {};
+  for (const [key, url] of iconCache) if (url) out[key] = url;
+  try {
+    localStorage.setItem("icons", JSON.stringify(out));
+  } catch (e) {}
 }
 
 function formatMem(mb) {
@@ -81,10 +175,11 @@ function appScore(query, key) {
   return Math.max(fuzzyScore(query, key.replace(/\.exe$/, "")), fuzzyScore(query, displayName(key)));
 }
 
+// "Result" line under the Clean button, with a small fade-in each time it changes
 function setResult(text) {
   el.result.textContent = text;
   el.result.classList.remove("flash");
-  void el.result.offsetWidth; 
+  void el.result.offsetWidth; // forces the browser to restart the animation
   el.result.classList.add("flash");
 }
 
@@ -94,18 +189,27 @@ function pulseGauge() {
   el.gauge.classList.add("pulse");
 }
 
+// =====================================================================
+// RAM gauge
+// =====================================================================
 
-const CIRCUMFERENCE = 2 * Math.PI * 52; 
+const CIRCUMFERENCE = 2 * Math.PI * 52; // matches r="52" in the SVG
 let shownPercent = 0;
 let percentAnimId = 0;
 
+// Counts the big number up/down smoothly instead of jumping
 function animatePercent(target) {
+  if (Math.abs(target - shownPercent) < 0.5) {
+    shownPercent = target;
+    el.percent.textContent = Math.round(target);
+    return;
+  }
   const id = ++percentAnimId;
   const from = shownPercent;
   const start = performance.now();
   const duration = 800;
   function tick(now) {
-    if (id !== percentAnimId) return; 
+    if (id !== percentAnimId) return; // a newer animation took over
     const t = Math.min(1, (now - start) / duration);
     const eased = 1 - Math.pow(1 - t, 3);
     shownPercent = from + (target - from) * eased;
@@ -120,8 +224,8 @@ async function refreshMemory() {
   const pct = info.percent_used;
 
   el.gaugeFill.style.strokeDashoffset = CIRCUMFERENCE * (1 - pct / 100);
-  el.gauge.classList.toggle("warn", pct >= 80 && pct < 90); 
-  el.gauge.classList.toggle("danger", pct >= 90);           
+  el.gauge.classList.toggle("warn", pct >= 80 && pct < 90); // orange from 80%
+  el.gauge.classList.toggle("danger", pct >= 90);           // red from 90%
   animatePercent(pct);
 
   el.statUsed.textContent = `${info.used_gb.toFixed(1)} GB`;
@@ -129,6 +233,9 @@ async function refreshMemory() {
   el.statTotal.textContent = `${info.total_gb.toFixed(1)} GB`;
 }
 
+// =====================================================================
+// Running apps (grouped by app name, expandable to show PIDs)
+// =====================================================================
 
 async function refreshProcesses() {
   allProcesses = await invoke("get_processes");
@@ -193,6 +300,7 @@ function createRow() {
   });
   row.querySelector('[data-act="clean"]').addEventListener("click", (e) => cleanGroup(row._g, e.currentTarget));
   row.querySelector('[data-act="exclude"]').addEventListener("click", () => addToList("whitelist", row._g.key));
+  // The entry animation only plays once; moving the row later must not replay it
   row.addEventListener("animationend", (e) => {
     if (e.target === row) row.classList.remove("enter");
   });
@@ -278,6 +386,7 @@ function renderProcesses() {
     }
     updateRow(row, g, maxMb);
     if (el.appList.children[i] !== row) el.appList.insertBefore(row, el.appList.children[i] || null);
+    requestIcon(g);
   });
 }
 
@@ -320,6 +429,10 @@ function setupSorting() {
     });
   }
 }
+
+// =====================================================================
+// Clean everything
+// =====================================================================
 
 function formatResult(r) {
   const parts = [`Freed about ${Math.round(r.freed_mb)} MB`, `${r.cleaned} processes cleaned`];
@@ -364,6 +477,10 @@ async function cleanAll() {
   }
 }
 
+// =====================================================================
+// Settings: load / save / render
+// =====================================================================
+
 const LIST_HINTS = {
   whitelist: "Apps on this list are never cleaned.",
   blacklist: "When Clean mode is set to Blacklist only, just these apps are cleaned.",
@@ -380,6 +497,7 @@ async function loadSettings() {
   renderSettings();
 }
 
+// Send the change to Rust; Rust tidies it (lowercase, limits) and returns the final version
 async function persistSettings() {
   settings = await invoke("save_settings", { settings });
   renderSettings();
@@ -478,6 +596,7 @@ function renderListPanel(tabChanged) {
   renderQuickAdd(true);
 }
 
+// ---- Running apps helper (used by suggestions and quick add) ----
 
 function runningApps() {
   const map = new Map();
@@ -491,6 +610,8 @@ function runningApps() {
   return [...map.values()];
 }
 
+// "Quick add": the 5 biggest RAM users not yet on the current list, one click each.
+// It only redraws when the set changes, so a click is never eaten by a refresh.
 let quickSignature = "";
 function renderQuickAdd(force) {
   if (!settings) return;
@@ -516,6 +637,8 @@ function renderQuickAdd(force) {
   }
 }
 
+// ---- Typeahead for the "add app" box ----
+
 let suggestionItems = [];
 let suggestionActive = -1;
 
@@ -531,6 +654,7 @@ function computeSuggestions() {
     .filter((a) => !already.has(a.key))
     .map((a) => ({ ...a, score: appScore(query, a.key) }))
     .filter((a) => a.score >= 0)
+    // empty query: biggest RAM first; otherwise best match first
     .sort((a, b) => (query ? b.score - a.score || a.key.localeCompare(b.key) : b.mb - a.mb))
     .slice(0, 8);
 }
@@ -554,6 +678,7 @@ function showSuggestions() {
     const meta = document.createElement("small");
     meta.textContent = formatMem(a.mb);
     row.append(avatar, name, meta);
+    // mousedown (not click) so the input keeps focus and the box doesn't close first
     row.addEventListener("mousedown", (e) => {
       e.preventDefault();
       chooseApp(a.key);
@@ -571,6 +696,8 @@ async function chooseApp(key) {
   el.listInput.focus();
 }
 
+// Typed text -> the key we store. "chrome" becomes "chrome.exe" if it is running;
+// for apps that are not running we simply add ".exe" ourselves.
 function resolveTyped(text) {
   const typed = text.trim().toLowerCase();
   if (!typed) return "";
@@ -642,6 +769,9 @@ function setupSettingsUi() {
   setupListEditor();
 }
 
+// =====================================================================
+// Theme (Auto / Light / Dark)
+// =====================================================================
 
 const THEMES = ["auto", "light", "dark"];
 
@@ -672,6 +802,12 @@ function setupTheme() {
     el.themeBtn.classList.add("spin");
   });
 }
+
+// =====================================================================
+// Custom dialog
+// One <dialog> reused for everything. ask() fills it and waits for a button;
+// the caller decides when to close it (so the welcome tour can swap steps smoothly).
+// =====================================================================
 
 let dialogEl, dialogTitle, dialogStep, dialogBody, dialogPrimary, dialogSecondary;
 let dialogResolve = null;
@@ -730,6 +866,10 @@ async function confirmDialog(title, message, primary = "OK", secondary = "Cancel
   return result === "primary";
 }
 
+// =====================================================================
+// Windows accent color
+// =====================================================================
+
 function readableTextOn(hex) {
   const n = parseInt(hex.slice(1), 16);
   const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
@@ -745,6 +885,9 @@ async function applyAccent() {
   root.setProperty("--accent-fg", readableTextOn(hex));
 }
 
+// =====================================================================
+// Welcome tour (first run)
+// =====================================================================
 
 function infoBody(...paragraphs) {
   const box = document.createElement("div");
@@ -862,6 +1005,40 @@ async function runOnboarding() {
   await persistSettings();
 }
 
+// =====================================================================
+// Polling (only while visible)
+// =====================================================================
+
+function startPolling() {
+  stopPolling();
+  pollTimers = [
+    setInterval(refreshMemory, 3000),
+    setInterval(refreshProcesses, 5000), // the process list is the heavy one
+    setInterval(applyAccent, 15000),
+  ];
+}
+
+function stopPolling() {
+  pollTimers.forEach(clearInterval);
+  pollTimers = [];
+}
+
+function setActive(next) {
+  if (next === active) return;
+  active = next;
+  document.documentElement.classList.toggle("paused", !next);
+  stopPolling();
+  if (next) {
+    refreshAll();
+    applyAccent();
+    startPolling();
+    drainIcons();
+  }
+}
+
+// =====================================================================
+// Start
+// =====================================================================
 
 window.addEventListener("DOMContentLoaded", () => {
   el = {
@@ -918,21 +1095,23 @@ window.addEventListener("DOMContentLoaded", () => {
   });
   el.tourBtn.addEventListener("click", () => runOnboarding());
 
-  // Follow the Windows accent color (also picks up changes made while the app is open)
-  applyAccent();
-  setInterval(applyAccent, 5000);
-
   // Rust's background thread (auto clean) sends events; we show them here
   listen("auto-cleaned", (e) => {
     setResult("Auto clean: " + formatResult(e.payload));
-    pulseGauge();
-    refreshAll();
+    if (active) {
+      pulseGauge();
+      refreshAll();
+    }
   });
   listen("auto-clean-blocked", (e) => {
     setResult(`Auto clean skipped: ${displayName(e.payload)} is running`);
   });
 
-  refreshAll();
-  setInterval(refreshMemory, 2000);
-  setInterval(refreshProcesses, 3000); // the process list is heavier, 3 seconds is enough
+  // Poll only while the window is on screen. In the tray there are no timers,
+  // no animations and no Win32 calls from this side at all.
+  listen("window-visibility", (e) => setActive(e.payload));
+  document.addEventListener("visibilitychange", async () => {
+    setActive(!document.hidden && (await invoke("is_window_visible")));
+  });
+  invoke("is_window_visible").then(setActive, () => setActive(true));
 });

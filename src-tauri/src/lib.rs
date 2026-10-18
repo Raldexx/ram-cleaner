@@ -1,20 +1,26 @@
-use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use serde::Serialize;
+use tauri::{Emitter, Manager};
+
+mod icons;
 mod smart;
 use smart::{AppState, Settings};
 
 use windows::core::w;
-use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
-
-use windows::Win32::System::ProcessStatus::{
-    GetPerformanceInfo, PERFORMANCE_INFORMATION, EnumProcesses, GetModuleBaseNameA,
-    PROCESS_MEMORY_COUNTERS, GetProcessMemoryInfo, EmptyWorkingSet,
-};
 use windows::Win32::Foundation::CloseHandle;
-use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_SET_QUOTA, PROCESS_VM_READ,
-    GetCurrentProcess,
+use windows::Win32::System::ProcessStatus::{
+    EmptyWorkingSet, EnumProcesses, GetModuleBaseNameA, GetPerformanceInfo, GetProcessMemoryInfo,
+    PERFORMANCE_INFORMATION, PROCESS_MEMORY_COUNTERS,
 };
+use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_SET_QUOTA, PROCESS_VM_READ,
+};
+
+/// True while the main window is on screen (not hidden to the tray, not minimized).
+/// The UI stops polling and animating while this is false.
+static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(true);
 
 #[derive(Serialize, Clone)]
 pub struct MemoryInfo {
@@ -37,9 +43,9 @@ pub struct CleanResult {
     failed: u32,
     skipped: u32,
     freed_mb: f64,
+    /// Set when cleaning was refused because a critical process is running (value = its name).
     blocked_by: Option<String>,
 }
-
 
 pub(crate) fn read_memory_info() -> MemoryInfo {
     let mut perf_info = PERFORMANCE_INFORMATION::default();
@@ -69,7 +75,7 @@ pub(crate) fn read_memory_info() -> MemoryInfo {
 }
 
 fn read_process_list() -> Vec<ProcessInfo> {
-    let mut process_ids: [u32; 1024] = [0; 1024];
+    let mut process_ids: [u32; 4096] = [0; 4096];
     let mut bytes_returned: u32 = 0;
 
     unsafe {
@@ -83,16 +89,13 @@ fn read_process_list() -> Vec<ProcessInfo> {
     let process_count = bytes_returned as usize / std::mem::size_of::<u32>();
     let mut result = Vec::with_capacity(process_count);
 
-    for i in 0..process_count {
-        let pid = process_ids[i];
+    for &pid in &process_ids[..process_count] {
         if pid == 0 {
             continue;
         }
 
-
-        let handle_result = unsafe {
-            OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid)
-        };
+        let handle_result =
+            unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, false, pid) };
 
         if let Ok(handle) = handle_result {
             let mut name_buffer: [u8; 260] = [0; 260];
@@ -123,14 +126,12 @@ fn read_process_list() -> Vec<ProcessInfo> {
                 let _ = CloseHandle(handle);
             }
         }
-
     }
 
-    // most memory-consuming processes first    
+    // most memory-consuming processes first
     result.sort_by(|a, b| b.memory_mb.partial_cmp(&a.memory_mb).unwrap());
     result
 }
-
 
 fn clean_own_memory() {
     unsafe {
@@ -139,12 +140,10 @@ fn clean_own_memory() {
     }
 }
 
-
 fn clean_process(pid: u32) -> bool {
     // EmptyWorkingSet needs PROCESS_SET_QUOTA, not PROCESS_VM_OPERATION.
-    let handle_result = unsafe {
-        OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_SET_QUOTA, false, pid)
-    };
+    let handle_result =
+        unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_SET_QUOTA, false, pid) };
 
     match handle_result {
         Ok(handle) => {
@@ -162,7 +161,7 @@ pub(crate) fn clean_all_processes(settings: &Settings, force: bool) -> CleanResu
     let before = read_memory_info();
     let processes = read_process_list();
 
-    // critical process guard: whitelist/blacklist/guard_list controls which processes can be cleaned. If a guard process is running, cleaning is blocked.
+    // Critical process guard: if one is running (and the caller didn't force), touch nothing.
     if !force {
         let names: Vec<String> = processes.iter().map(|p| p.name.clone()).collect();
         if let Some(name) = settings.find_guard_hit(&names) {
@@ -181,6 +180,7 @@ pub(crate) fn clean_all_processes(settings: &Settings, force: bool) -> CleanResu
     let mut skipped = 0u32;
 
     for p in &processes {
+        // whitelist / blacklist decision happens here
         if !settings.should_clean(&p.name.to_lowercase()) {
             skipped += 1;
             continue;
@@ -204,36 +204,7 @@ pub(crate) fn clean_all_processes(settings: &Settings, force: bool) -> CleanResu
     }
 }
 
-
-#[tauri::command]
-fn get_memory_info() -> MemoryInfo {
-    read_memory_info()
-}
-
-#[tauri::command]
-fn get_processes() -> Vec<ProcessInfo> {
-    read_process_list()
-}
-
-#[tauri::command]
-fn clean_all(force: Option<bool>, state: tauri::State<AppState>) -> CleanResult {
-    let settings = state.settings.lock().unwrap().clone();
-    clean_all_processes(&settings, force.unwrap_or(false))
-}
-
-#[tauri::command]
-fn get_settings(state: tauri::State<AppState>) -> Settings {
-    state.settings.lock().unwrap().clone()
-}
-
-#[tauri::command]
-fn save_settings(mut settings: Settings, state: tauri::State<AppState>) -> Settings {
-    settings.sanitize();
-    *state.settings.lock().unwrap() = settings.clone();
-    state.save();
-    settings
-}
-
+/// Reads one DWORD from HKEY_CURRENT_USER\<subkey>\<value>.
 fn read_dword(subkey: windows::core::PCWSTR, value: windows::core::PCWSTR) -> Option<u32> {
     let mut data: u32 = 0;
     let mut size: u32 = std::mem::size_of::<u32>() as u32;
@@ -251,13 +222,69 @@ fn read_dword(subkey: windows::core::PCWSTR, value: windows::core::PCWSTR) -> Op
     if status.0 == 0 { Some(data) } else { None }
 }
 
+/// Tells the UI whether the window is on screen, so it can stop polling while in the tray.
+/// Only emits when the state actually changes (resizing fires many events).
+fn publish_visibility(app: &tauri::AppHandle, visible: bool) {
+    if WINDOW_VISIBLE.swap(visible, Ordering::Relaxed) != visible {
+        let _ = app.emit("window-visibility", visible);
+    }
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        publish_visibility(app, true);
+    }
+}
+
+#[tauri::command]
+fn get_memory_info() -> MemoryInfo {
+    read_memory_info()
+}
+
+// `(async)` runs a plain function on a worker thread instead of the main (UI) thread,
+// so enumerating hundreds of processes can't freeze the window.
+#[tauri::command(async)]
+fn get_processes() -> Vec<ProcessInfo> {
+    read_process_list()
+}
+
+#[tauri::command(async)]
+fn clean_all(force: Option<bool>, app: tauri::AppHandle) -> CleanResult {
+    let settings = app.state::<AppState>().settings.lock().unwrap().clone();
+    clean_all_processes(&settings, force.unwrap_or(false))
+}
+
+#[tauri::command(async)]
+fn clean_single(pid: u32) -> bool {
+    clean_process(pid)
+}
+
+#[tauri::command]
+fn get_settings(state: tauri::State<AppState>) -> Settings {
+    state.settings.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn save_settings(mut settings: Settings, state: tauri::State<AppState>) -> Settings {
+    settings.sanitize();
+    *state.settings.lock().unwrap() = settings.clone();
+    state.save();
+    settings
+}
+
+/// Windows accent color as "#rrggbb", or None when it can't be read (the UI keeps its default blue).
 #[tauri::command]
 fn get_accent_color() -> Option<String> {
     let key = w!("Software\\Microsoft\\Windows\\DWM");
 
+    // AccentColor is stored as 0xAABBGGRR (channels reversed)
     if let Some(v) = read_dword(key, w!("AccentColor")) {
         return Some(format!("#{:02x}{:02x}{:02x}", v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF));
     }
+    // Fallback: ColorizationColor, stored as 0xAARRGGBB
     read_dword(key, w!("ColorizationColor"))
         .map(|v| format!("#{:02x}{:02x}{:02x}", (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF))
 }
@@ -277,36 +304,46 @@ fn set_autostart(enabled: bool, app: tauri::AppHandle) -> bool {
 }
 
 #[tauri::command]
-fn clean_single(pid: u32) -> bool {
-    clean_process(pid)
+fn is_window_visible() -> bool {
+    WINDOW_VISIBLE.load(Ordering::Relaxed)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    use tauri::tray::TrayIconBuilder;
     use tauri::menu::{Menu, MenuItem};
-    use tauri::Manager;
-
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
     clean_own_memory();
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
+            // Windows starts us with this flag at login, so we can stay in the tray quietly.
+            Some(vec!["--minimized"]),
         ))
         .setup(|app| {
             use tauri_plugin_autostart::ManagerExt;
 
+            // Settings live in %APPDATA%\<identifier>\settings.json
             let config_dir = app.path().app_config_dir()?;
             app.manage(AppState::load(config_dir.join("settings.json")));
 
+            // Only on the very first run, start with Windows by default.
+            // After onboarding the user's own choice is never overridden.
             let first_run = !app.state::<AppState>().settings.lock().unwrap().onboarded;
             if first_run {
                 let _ = app.autolaunch().enable();
             }
             smart::start_auto_cleaner(app.handle().clone());
+
+            // The window is created hidden (see tauri.conf.json) so a login start
+            // doesn't flash a window on screen. Show it unless we were asked to stay quiet.
+            let start_hidden = std::env::args().any(|a| a == "--minimized");
+            if start_hidden {
+                WINDOW_VISIBLE.store(false, Ordering::Relaxed);
+            } else if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+            }
 
             let show_item = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -314,27 +351,41 @@ pub fn run() {
 
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
+                .tooltip("RAM Cleaner")
                 .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main_window(tray.app_handle());
+                    }
+                })
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            window.show().unwrap();
-                            window.set_focus().unwrap();
-                        }
-                    }
-                    "quit" => {
-                        app.exit(0);
-                    }
+                    "show" => show_main_window(app),
+                    "quit" => app.exit(0),
                     _ => {}
                 })
                 .build(app)?;
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                window.hide().unwrap();
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
+                let _ = window.hide();
+                publish_visibility(window.app_handle(), false);
+                clean_own_memory();
             }
+            tauri::WindowEvent::Resized(_) => {
+                // Minimizing arrives as a resize; treat a minimized window like a hidden one.
+                let on_screen = window.is_visible().unwrap_or(true)
+                    && !window.is_minimized().unwrap_or(false);
+                publish_visibility(window.app_handle(), on_screen);
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             get_memory_info,
@@ -345,7 +396,9 @@ pub fn run() {
             save_settings,
             get_accent_color,
             get_autostart,
-            set_autostart
+            set_autostart,
+            is_window_visible,
+            icons::get_app_icon
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
