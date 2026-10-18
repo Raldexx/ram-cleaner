@@ -1,0 +1,51 @@
+name: Release
+
+# Builds the Windows installer on GitHub's servers whenever you push a tag like v0.1.1,
+# then attaches it to a GitHub Release. Nothing is built on your own PC.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build files
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install npm packages
+        run: npm ci
+
+      - name: Build the installer and publish the release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "RAM Cleaner ${{ github.ref_name }}"
+          releaseBody: |
+            Download the `x64-setup.exe` installer below and run it.
+
+            The installer is not code signed, so Windows SmartScreen may show an
+            "unknown publisher" warning: click **More info**, then **Run anyway**.
+            The app asks for administrator rights because cleaning other processes needs them.
+          releaseDraft: false
+          prerelease: false
